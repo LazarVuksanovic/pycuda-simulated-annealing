@@ -21,6 +21,15 @@ def energy(image):
 #   new = calculate_energy(image2[row_low:row_high, col_low:col_high], result_gpu, np.uint8(width), np.uint8(width), block=(12, 1, 1), grid=(1, 1, 1))
 #   return new - old
 
+def generate_to_swap():
+    global image
+    m = []
+    for i in range(0,8):
+        src = list(np.random.randint(0, image.shape[0] - 1, 2))
+        src.append(np.random.randint(0, 2))
+        m.append(src)
+    return m
+
 mod = SourceModule("""
       __global__ void calculate_energy(unsigned char *image, int *result, int width) {
           __shared__ int energy;
@@ -35,7 +44,7 @@ mod = SourceModule("""
           int red_idx = idx*3;
           int green_idx = red_idx+1;
           int blue_idx = red_idx+2;
-          int local_energy_red, local_energy_green, local_energy_blue;
+          //int local_energy_red, local_energy_green, local_energy_blue;
 
           image_device[red_idx] = image[red_idx];
           image_device[green_idx] = image[green_idx];
@@ -46,30 +55,91 @@ mod = SourceModule("""
 
           __syncthreads();
           
-          if(x < width - 1){
-            local_energy_red = abs(image_device[red_idx] - image_device[red_idx + 3]);
-            local_energy_green = abs(image_device[green_idx] - image_device[green_idx + 3]);
-            local_energy_blue = abs(image_device[blue_idx] - image_device[blue_idx + 3]);
-            atomicAdd(&energy, local_energy_red + local_energy_green + local_energy_blue);
-          }
-
-          if(y < width - 1){
-            local_energy_red = abs(image_device[red_idx] - image_device[red_idx + width*3]);
-            local_energy_green = abs(image_device[green_idx] - image_device[green_idx + width*3]);
-            local_energy_blue = abs(image_device[blue_idx] - image_device[blue_idx + width*3]);
-            atomicAdd(&energy, local_energy_red + local_energy_green + local_energy_blue);
-          }
-
+          if(x < width - 1)
+            atomicAdd(&energy, abs(image_device[red_idx] - image_device[red_idx + 3])
+                             + abs(image_device[green_idx] - image_device[green_idx + 3])
+                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]));
+          
+          if(y < width - 1)
+            atomicAdd(&energy, abs(image_device[red_idx] - image_device[red_idx + width*3])
+                             + abs(image_device[green_idx] - image_device[green_idx + width*3])
+                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]));
+          
           __syncthreads();
 
           if (threadIdx.x == 0 && threadIdx.y == 0)
               *result = energy;
       }
+      
+      __global__ void simulated_annealing(int *image_host, int width, int *result, int *to_swap){
+        extern __shared__ image[32 * 32 * 3];
+
+        //pixel je nasumican piksel, a pixel2 je odabrani sused
+        int pixel = to_swap[threadIdx.y][0] + to_swap[threadIdx.y][1] * width;
+        int pixel2 = (to_swap[threadIdx.y][2] == 1) ? pixel + 1 : pixel + width;
+
+        int idx = pixel;
+        int idx2 = pixel2
+        
+        //odredjujemo za koji piksel ce nit da racuna energiju
+        switch(threadIdx.x % 8){
+          case 0: idx -= width + 1;
+          case 1: idx -= width; break;
+          case 2: idx -= width + 1; break;
+          case 3: idx -= 1; break;
+          case 4: idx = idx; break;
+          case 5: idx += 1; break;
+          case 6: idx += width - 1; break;
+          case 7: idx += width; break;
+          case 8: idx += width + 1; break;
+          case 9: idx = (to_swap[threadIdx.y][2] == 1) ? (idx2 - width) + 1 : (idx2 + width) -1; break;
+          case 10: idx = (to_swap[threadIdx.y][2] == 1) ? idx2 + 1 : idx2 + width; break;
+          case 11: idx = idx2 + width+1; break;
+        }
+        
+        //offsetovi za odredjene boje
+        int red_idx = idx*3;
+        int green_idx = red_idx+1;
+        int blue_idx = red_idx+2;
+        int cell_energy_before = 0, cell_energy_after = 0;
+        
+        int desno, levo;
+        
+        //prvo proveramavo da li je idx validan
+        if(idx >= 0 && idx < width){
+        
+          //racunamo energiju pre promene, (dodajemo ako suseda ima)
+          if((idx % width) < width - 1){
+            desno = abs(image_device[red_idx] - image_device[red_idx + 3])
+                             + abs(image_device[green_idx] - image_device[green_idx + 3])
+                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]);
+            atomicAdd(&cell_energy_before, desno);
+          }
+          
+          if((idx / width) < width - 1)
+            levo = abs(image_device[red_idx] - image_device[red_idx + width*3])
+                             + abs(image_device[green_idx] - image_device[green_idx + width*3])
+                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]);
+            atomicAdd(&cell_energy_before, levo);
+            
+          //racunamo energiju posle promene
+          //if((idx % width) < width - 1){
+            
+          //}
+        }
+
+        if(to_swap[threadIdx.y][2] == 1){
+            
+        }
+        else{
+          //menjamo sa donjim
+        }
+      }
    """)
 if __name__ == "__main__":
     width = 32
-    image = np.random.randint(1, 255, (4, 4, 3), dtype=np.uint8)#np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)
-    #print(image)
+    image = np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)#np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)
+    print(image)
     # definisanje cuda parametara
     image_gpu = cuda.mem_alloc(image.nbytes)
     cuda.memcpy_htod(image_gpu, image)
@@ -83,6 +153,21 @@ if __name__ == "__main__":
     calculate_energy(image_gpu, result_gpu, np.int32(width), block=(32, 32, 1), grid=(1, 1, 1))
     cuda.memcpy_dtoh(result, result_gpu)
     cuda.memcpy_dtoh(image, image_gpu)
+    # print("posle\n", image)
+    print("rezultat: ", result[0])
+    print("provera: ", energy(image))
+
+    # suma = np.zeros(1, dtype=np.int32)
+    # suma_gpu = cuda.mem_alloc(suma.nbytes)
+    # cuda.memcpy_htod(suma_gpu, suma)
+
+    simulated_annealing = mod.get_function("simulated_annealing")
+
+    simulated_annealing(image_gpu, np.int32(width), result_gpu, generate_to_swap(), block=(12, 8, 1), grid=(1, 1, 1))
+    cuda.memcpy_dtoh(suma, suma_gpu)
+    print(suma)
+
+
 
 # ponavljamo zamenu 100 puta, to_swap ima matrice za obradu zamene
 # simulated_annealing = mod.get_function("simulated_annealing")
@@ -96,46 +181,3 @@ if __name__ == "__main__":
 #   image2[tgt[0], tgt[1]] = image[src[0], src[1]]
 #   dE = energy_delta(image, image2, src, tgt)
 #   simulated_annealing(image_gpu, np.int32(width), result_gpu, to_swap, block(12, 8, 1), grid(1,1,1))
-    print("posle\n", image)
-    print("rezultat: ", result[0])
-    print("provera: ", energy(image))
-
-
-
-# __global__ void simulated_annealing(int *image_host, int width, int energy, int *to_swap){
-#         //__shared__ image[32 * 32 * 3];
-
-#         //idx je nasumican piksel, a idx2 je odabrani sused
-#         int idx = to_swap[threadIdx.y][0] + to_swap[threadIdx.y][1] * width;
-#         int idx2 = (to_swap[threadIdx.y][2] == 1) ? idx + 1 : idx + width;
-
-#         //offsetovi za odredjene boje
-#         int red_idx = idx;
-#         int green_idx = width * width + idx;
-#         int blue_idx = 2 * width * width + idx;
-#         int local_energy, local_energy_red, local_energy_green, local_energy_blue, before_swap_energy;
-
-#         switch(threadIdx.x % threadIdx.y){
-#           case 0: idx -= width; break;
-#           case 1: idx += width; break;
-#           case 2: idx -= 1; break;
-#           case 3: idx += 1; break;
-#           case 4: idx = idx2 + 1; break;
-#           case 5: idx = idx2 + width; break;
-#           case 6: idx = idx2 + (to_swap[threadIdx.y][2] == 1) ? -1 : -width; break;
-#         }
-
-#         local_energy_red = abs(image[red_idx] - image[red_idx + 1]) + abs(image[red_idx] - image[red_idx + width]);
-#         local_energy_green = abs(image[green_idx] - image[green_idx + 1]) + abs(image[green_idx] - image[green_idx + width]);
-#         local_energy_blue = abs(image[blue_idx] - image[blue_idx + 1]) + abs(image[blue_idx] - image[blue_idx + width]);
-#         before_swap_energy = local_energy_red + local_energy_green + local_energy_blue;
-
-#         __syncthreads();
-
-#         if(trg == 0){
-
-#         }
-#         else{
-#           //menjamo sa donjim
-#         }
-#       }
