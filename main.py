@@ -3,23 +3,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import numpy as np
-
-
-def energy(image):
-    distances = np.zeros_like(image, dtype=np.uint8)
-    distances[:, :-1, :] += np.abs(image[:, :-1, :] - image[:, 1:, :])
-    distances[:-1, :, :] += np.abs(image[:-1, :, :] - image[1:, :, :])
-    return distances.sum()
-
-
-# def energy_delta(image, image2, src, tgt):
-#   row_low = max(0, src[0] - 1)
-#   row_high = tgt[0] + 2
-#   col_low = max(0, src[1] - 1)
-#   col_high = tgt[1] + 2
-#   old = calculate_energy(image[row_low:row_high, col_low:col_high], result_gpu, np.uint8(width), np.uint8(width), block=(12, 1, 1), grid=(1, 1, 1))
-#   new = calculate_energy(image2[row_low:row_high, col_low:col_high], result_gpu, np.uint8(width), np.uint8(width), block=(12, 1, 1), grid=(1, 1, 1))
-#   return new - old
+import random
 
 def generate_to_swap():
     global image
@@ -35,11 +19,7 @@ mod = SourceModule("""
           __shared__ int energy;
           __shared__ unsigned char image_device[32*32*3];
           
-          //int idx = threadIdx.x + blockDim.x * blockIdx.x + threadIdx.y * width + blockDim.y * blockIdx.y * width * 3;
           int idx = threadIdx.x + threadIdx.y * width;
-
-          int x = threadIdx.x;
-          int y = threadIdx.y;
 
           int red_idx = idx*3;
           int green_idx = red_idx+1;
@@ -55,129 +35,247 @@ mod = SourceModule("""
 
           __syncthreads();
           
-          if(x < width - 1)
+          if(threadIdx.x < (width - 1))
             atomicAdd(&energy, abs(image_device[red_idx] - image_device[red_idx + 3])
                              + abs(image_device[green_idx] - image_device[green_idx + 3])
                              + abs(image_device[blue_idx] - image_device[blue_idx + 3]));
           
-          if(y < width - 1)
+          if(threadIdx.y < (width - 1))
             atomicAdd(&energy, abs(image_device[red_idx] - image_device[red_idx + width*3])
                              + abs(image_device[green_idx] - image_device[green_idx + width*3])
-                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]));
-          
+                             + abs(image_device[blue_idx] - image_device[blue_idx + width*3]));
+                             
           __syncthreads();
 
           if (threadIdx.x == 0 && threadIdx.y == 0)
               *result = energy;
       }
       
-      __global__ void simulated_annealing(int *image_host, int width, int *result, int *to_swap){
-        extern __shared__ image[32 * 32 * 3];
-
+      __global__ void simulated_annealing(unsigned char *image_device, int width, int *result, int *to_swap, int *results_host, float temp, float p){
+        //extern __shared__ image[32 * 32 * 3];
+        
+        __shared__ int results[8];
+        if(threadIdx.x == 0)
+            results[threadIdx.y] = 0;
+            
         //pixel je nasumican piksel, a pixel2 je odabrani sused
-        int pixel = to_swap[threadIdx.y][0] + to_swap[threadIdx.y][1] * width;
-        int pixel2 = (to_swap[threadIdx.y][2] == 1) ? pixel + 1 : pixel + width;
-
+        int y = to_swap[threadIdx.y*3];
+        int x = to_swap[threadIdx.y*3+1];
+        int pixel = x*3 + y * 3*width;
+        int pixel2 = (to_swap[threadIdx.y*3+2] == 1) ? pixel + 3 : pixel + 3*width;
+        
         int idx = pixel;
-        int idx2 = pixel2
         
         //odredjujemo za koji piksel ce nit da racuna energiju
-        switch(threadIdx.x % 8){
-          case 0: idx -= width + 1;
-          case 1: idx -= width; break;
-          case 2: idx -= width + 1; break;
-          case 3: idx -= 1; break;
-          case 4: idx = idx; break;
-          case 5: idx += 1; break;
-          case 6: idx += width - 1; break;
-          case 7: idx += width; break;
-          case 8: idx += width + 1; break;
-          case 9: idx = (to_swap[threadIdx.y][2] == 1) ? (idx2 - width) + 1 : (idx2 + width) -1; break;
-          case 10: idx = (to_swap[threadIdx.y][2] == 1) ? idx2 + 1 : idx2 + width; break;
-          case 11: idx = idx2 + width+1; break;
+        switch(threadIdx.x){
+          case 0: x -= 1; y -= 1; break;
+          case 1: y -= 1; break;
+          case 2: x += 1; y -= 1; break;
+          case 3: x -= 1; break;
+          case 4: break;
+          case 5: x += 1; break;
+          case 6: x -= 1; y += 1; break;
+          case 7: y += 1; break;
+          case 8: x += 1;y += 1; break;
+          case 9: x += (to_swap[threadIdx.y*3+2] == 1) ? 2 : -1; y += (to_swap[threadIdx.y*3+2] == 1) ? -1 : 2; break;
+          case 10: x += (to_swap[threadIdx.y*3+2] == 1) ? 2 : 0; y += (to_swap[threadIdx.y*3+2] == 1) ? 0 : 2; break;
+          case 11: x += (to_swap[threadIdx.y*3+2] == 1) ? 2 : 1; y += (to_swap[threadIdx.y*3+2] == 1) ? 1 : 2; break;
         }
         
+        //idx je kordinata piksela koji nit treba da obradi
+        idx = x*3 + y * 3*width;
+        
         //offsetovi za odredjene boje
-        int red_idx = idx*3;
+        
+        int red_idx = idx;
         int green_idx = red_idx+1;
         int blue_idx = red_idx+2;
         int cell_energy_before = 0, cell_energy_after = 0;
         
-        int desno, levo;
-        
         //prvo proveramavo da li je idx validan
-        if(idx >= 0 && idx < width){
+        if(x > -1 && x < width && y > -1 && y < width){
         
-          //racunamo energiju pre promene, (dodajemo ako suseda ima)
-          if((idx % width) < width - 1){
-            desno = abs(image_device[red_idx] - image_device[red_idx + 3])
-                             + abs(image_device[green_idx] - image_device[green_idx + 3])
-                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]);
-            atomicAdd(&cell_energy_before, desno);
+          //racunamo energiju sa desnim ako postoji
+          if(x < width-1 || (idx == pixel2 && (to_swap[threadIdx.y*3+2] == 1))){
+            
+            //pre promene
+            cell_energy_before += abs(image_device[red_idx] - image_device[red_idx + 3])
+                                + abs(image_device[green_idx] - image_device[green_idx + 3])
+                                + abs(image_device[blue_idx] - image_device[blue_idx + 3]);
+            
+            //posle promene
+            if(idx == pixel && ((idx + 3) == pixel2)){
+                cell_energy_after += abs(image_device[pixel2 + 3] - image_device[pixel])
+                                   + abs(image_device[pixel2 + 1 + 3] - image_device[pixel+1])
+                                   + abs(image_device[pixel2 + 2 + 3] - image_device[pixel+2]);
+            }
+            else if(idx == pixel2 && ((idx - 3) == pixel)){
+            
+                cell_energy_after += abs(image_device[pixel2] - image_device[pixel])
+                                   + abs(image_device[pixel2 + 1] - image_device[pixel+1])
+                                   + abs(image_device[pixel2 + 2] - image_device[pixel+2]);
+            }
+            else if(idx == pixel){
+                cell_energy_after += abs(image_device[pixel] - image_device[pixel2 + 3])
+                                   + abs(image_device[pixel + 1] - image_device[(pixel2+1) + 3])
+                                   + abs(image_device[pixel + 2] - image_device[(pixel2+2) + 3]);
+            }
+            else if(idx == pixel2){
+                cell_energy_after += abs(image_device[pixel2] - image_device[pixel + 3])
+                                   + abs(image_device[pixel2 + 1] - image_device[(pixel+1) + 3])
+                                   + abs(image_device[pixel2 + 2] - image_device[(pixel+2) + 3]);
+            }
+            else if(idx+3 == pixel){
+                cell_energy_after += abs(image_device[red_idx] - image_device[pixel2])
+                                   + abs(image_device[green_idx] - image_device[(pixel2+1)])
+                                   + abs(image_device[blue_idx] - image_device[(pixel2+2)]);
+            }
+            else if(idx+3 == pixel2){
+                cell_energy_after += abs(image_device[red_idx] - image_device[pixel])
+                                   + abs(image_device[green_idx] - image_device[(pixel+1)])
+                                   + abs(image_device[blue_idx] - image_device[(pixel+2)]);
+            }
+            else{
+                cell_energy_after += abs(image_device[red_idx] - image_device[red_idx + 3])
+                                   + abs(image_device[green_idx] - image_device[green_idx + 3])
+                                   + abs(image_device[blue_idx] - image_device[blue_idx + 3]);
+            }
           }
           
-          if((idx / width) < width - 1)
-            levo = abs(image_device[red_idx] - image_device[red_idx + width*3])
-                             + abs(image_device[green_idx] - image_device[green_idx + width*3])
-                             + abs(image_device[blue_idx] - image_device[blue_idx + 3]);
-            atomicAdd(&cell_energy_before, levo);
-            
-          //racunamo energiju posle promene
-          //if((idx % width) < width - 1){
-            
-          //}
-        }
+          //racunamo energiju sa donjim ako postoji
+          if(y < width - 1 || (idx == pixel2 && (to_swap[threadIdx.y*3+2] == 0))){
 
-        if(to_swap[threadIdx.y][2] == 1){
+            //pre promene
+            cell_energy_before += abs(image_device[red_idx] - image_device[red_idx + width*3])
+                                + abs(image_device[green_idx] - image_device[green_idx + width*3])
+                                + abs(image_device[blue_idx] - image_device[blue_idx + width*3]);
             
+            //posle promene
+            if(idx == pixel && (idx + 3*width) == pixel2){
+                cell_energy_after += abs(image_device[pixel2 + 3*width] - image_device[pixel])
+                                   + abs(image_device[(pixel2 + 1) + 3*width] - image_device[pixel+1])
+                                   + abs(image_device[(pixel2 + 2) + 3*width] - image_device[pixel+2]);
+            }
+            else if(idx == pixel2 && (idx - 3*width) == pixel){
+                cell_energy_after += abs(image_device[pixel2] - image_device[pixel])
+                                   + abs(image_device[pixel2 + 1] - image_device[pixel+1])
+                                   + abs(image_device[pixel2 + 2] - image_device[pixel+2]);
+            }
+            else if(idx == pixel){
+                cell_energy_after += abs(image_device[pixel] - image_device[pixel2 + width*3])
+                                   + abs(image_device[pixel + 1] - image_device[(pixel2+1) + width*3])
+                                   + abs(image_device[pixel + 2] - image_device[(pixel2+2) + width*3]);
+            }
+            else if(idx == pixel2){
+                cell_energy_after += abs(image_device[pixel2] - image_device[pixel + width*3])
+                                   + abs(image_device[pixel2 + 1] - image_device[(pixel+1) + width*3])
+                                   + abs(image_device[pixel2 + 2] - image_device[(pixel+2) + width*3]);
+            }
+            else if(idx+width*3 == pixel){
+                cell_energy_after += abs(image_device[red_idx] - image_device[pixel2])
+                                   + abs(image_device[green_idx] - image_device[(pixel2+1)])
+                                   + abs(image_device[blue_idx] - image_device[(pixel2+2)]);
+                
+            }
+            else if(idx+width*3 == pixel2){
+                cell_energy_after += abs(image_device[red_idx] - image_device[pixel])
+                                   + abs(image_device[green_idx] - image_device[pixel+1])
+                                   + abs(image_device[blue_idx] - image_device[pixel+2]);
+            }
+            else{
+                cell_energy_after += abs(image_device[red_idx] - image_device[red_idx + width*3])
+                                   + abs(image_device[green_idx] - image_device[green_idx + width*3])
+                                   + abs(image_device[blue_idx] - image_device[blue_idx + width*3]);
+            }
+          }
         }
-        else{
-          //menjamo sa donjim
+        atomicAdd(&results[threadIdx.y], cell_energy_after - cell_energy_before);
+        
+        __syncthreads();
+        
+        if(threadIdx.x == 0)
+            results_host[threadIdx.y] = results[threadIdx.y];
+        
+        __syncthreads();
+        
+        if(threadIdx.x == 0 && threadIdx.y == 0){
+            float de = results[0];
+            int j;
+            for(int i = 1; i < 8; i++){
+                if(de > results[i]){
+                    de = results[i];
+                    j = i;
+                }
+            }
+            printf("najbolja promena: %0.0f => [%d, %d] <-> [%d, %d]", de, to_swap[j*3], to_swap[j*3+1],
+                                                                  (to_swap[j*3+2]) ? to_swap[j*3]: to_swap[j*3]+1,
+                                                                  (to_swap[j*3+2]) ? to_swap[j*3+1]+1 : to_swap[j*3+1]);
+            if(de < 0 || p < (-de / temp)*(-de / temp)){
+                //prihvaceno
+            }
         }
       }
    """)
 if __name__ == "__main__":
-    width = 32
-    image = np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)#np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)
-    print(image)
-    # definisanje cuda parametara
+    width = 5
+    #image = np.random.randint(0, 2, (5, 5, 3), dtype=np.uint8)#np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)
+    image = np.array([[[0, 1, 1], [0, 1, 0], [1, 0, 1], [1, 1, 1], [1, 0, 1]],
+                      [[1, 1, 1], [1, 0, 1], [1, 1, 1], [1, 0, 0], [1, 1, 0]],
+                      [[1, 1, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0], [0, 0, 1]],
+                      [[1, 0, 1], [0, 0, 0], [0, 1, 1], [0, 1, 1], [0, 1, 1]],
+                      [[0, 0, 1], [1, 0, 0], [1, 0, 1], [0, 1, 1], [1, 1, 1]]], dtype=np.uint8)
+
+    """DEFINISANJE PARAMETARE"""
     image_gpu = cuda.mem_alloc(image.nbytes)
     cuda.memcpy_htod(image_gpu, image)
 
-    result = np.zeros(1, dtype=np.int32)
-    result_gpu = cuda.mem_alloc(result.nbytes)
-    cuda.memcpy_htod(result_gpu, result)
+    energy = np.zeros(1, dtype=np.int32)
+    energy_gpu = cuda.mem_alloc(energy.nbytes)
+    cuda.memcpy_htod(energy_gpu, energy)
 
-    # poziv kernela
+    results = np.zeros(8, dtype=np.int32)
+    results_gpu = cuda.mem_alloc(results.nbytes)
+    cuda.memcpy_htod(results_gpu, results)
+
+    to_swap = [[2, 0, 1], [2, 0, 0], [0, 0, 0], [0, 3, 1], [0, 2, 1], [2, 3, 0], [3, 1, 0], [0, 2, 0]]  # generate_to_swap()
+    to_swap_gpu = cuda.mem_alloc(np.array(to_swap).nbytes)
+    cuda.memcpy_htod(to_swap_gpu, np.array(to_swap))
+
+    start_temp = np.array([100], dtype=np.float32)
+    temp_gpu = cuda.mem_alloc(start_temp.nbytes)
+    cuda.memcpy_htod(temp_gpu, start_temp)
+
+    probability = np.array([random.random()], dtype=np.float32)
+    probability_gpu = cuda.mem_alloc(probability.nbytes)
+    cuda.memcpy_htod(probability_gpu, probability)
+
+    """POZIV KERNELA"""
     calculate_energy = mod.get_function("calculate_energy")  # 32, 32, 1        grid=(math.ceil(width/32), math.ceil(width/32), 1))
-    calculate_energy(image_gpu, result_gpu, np.int32(width), block=(32, 32, 1), grid=(1, 1, 1))
-    cuda.memcpy_dtoh(result, result_gpu)
+    calculate_energy(image_gpu, energy_gpu, np.int32(width), block=(5, 5, 1), grid=(1, 1, 1))
+    cuda.memcpy_dtoh(energy, energy_gpu)
     cuda.memcpy_dtoh(image, image_gpu)
-    # print("posle\n", image)
-    print("rezultat: ", result[0])
-    print("provera: ", energy(image))
-
-    # suma = np.zeros(1, dtype=np.int32)
-    # suma_gpu = cuda.mem_alloc(suma.nbytes)
-    # cuda.memcpy_htod(suma_gpu, suma)
+    print("energija: ", energy[0])
 
     simulated_annealing = mod.get_function("simulated_annealing")
+    simulated_annealing(image_gpu, np.int32(width), energy_gpu, to_swap_gpu, results_gpu, temp_gpu, probability_gpu, block=(12, 8, 1), grid=(1, 1, 1))
+    cuda.memcpy_dtoh(results, results_gpu)
+    print("\nresultati 8 swapova: ", results)
 
-    simulated_annealing(image_gpu, np.int32(width), result_gpu, generate_to_swap(), block=(12, 8, 1), grid=(1, 1, 1))
-    cuda.memcpy_dtoh(suma, suma_gpu)
-    print(suma)
-
-
-
-# ponavljamo zamenu 100 puta, to_swap ima matrice za obradu zamene
-# simulated_annealing = mod.get_function("simulated_annealing")
-# moves = np.array([(0, 1), (1, 0)], dtype=np.int32)
-# image2 = image
-# for i in range(1,100):
-#   src = np.random.randint(0, image.shape[0]-1, 2)
-#   move = moves[np.random.randint(0, 2)]
-#   tgt = src + move
-#   image2[src[0], src[1]] = image[tgt[0], tgt[1]]
-#   image2[tgt[0], tgt[1]] = image[src[0], src[1]]
-#   dE = energy_delta(image, image2, src, tgt)
-#   simulated_annealing(image_gpu, np.int32(width), result_gpu, to_swap, block(12, 8, 1), grid(1,1,1))
+    # starting_temp = 100
+    # total = 30_000_000
+    # for iteration in tqdm(range(total)):
+    #     t = iteration / total
+    #     temp = (1 - t) * starting_temp
+    #     image2[src[0], src[1]] = image[tgt[0], tgt[1]]
+    #     image2[tgt[0], tgt[1]] = image[src[0], src[1]]
+    #
+    #     dE = energy_delta(image, image2, src, tgt)
+    #     if dE < 0 or random.random() < np.exp2(-dE / temp):
+    #         image[src[0], src[1]] = image2[src[0], src[1]]
+    #         image[tgt[0], tgt[1]] = image2[tgt[0], tgt[1]]
+    #         # current_energy = new_energy
+    #         current_energy += dE
+    #         swaps += 1
+    #     else:
+    #         image2[src[0], src[1]] = image[src[0], src[1]]
+    #         image2[tgt[0], tgt[1]] = image[tgt[0], tgt[1]]
