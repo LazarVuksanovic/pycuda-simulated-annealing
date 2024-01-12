@@ -4,6 +4,7 @@ import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import numpy as np
 import random
+import matplotlib.pyplot as plt
 
 def generate_to_swap():
     global image
@@ -47,12 +48,13 @@ mod = SourceModule("""
                              
           __syncthreads();
 
-          if (threadIdx.x == 0 && threadIdx.y == 0)
+          if (threadIdx.x == 0 && threadIdx.y == 0){
               *result = energy;
+              image = image_device;
+          }
       }
       
-      __global__ void simulated_annealing(unsigned char *image_device, int width, int *result, int *to_swap, int *results_host, float temp, float p){
-        //extern __shared__ image[32 * 32 * 3];
+      __global__ void simulated_annealing(unsigned char *image_device, int width, int *energy, int *to_swap, int *results_host, float *temp, float *p){
         
         __shared__ int results[8];
         if(threadIdx.x == 0)
@@ -207,25 +209,41 @@ mod = SourceModule("""
                     j = i;
                 }
             }
-            printf("najbolja promena: %0.0f => [%d, %d] <-> [%d, %d]", de, to_swap[j*3], to_swap[j*3+1],
-                                                                  (to_swap[j*3+2]) ? to_swap[j*3]: to_swap[j*3]+1,
-                                                                  (to_swap[j*3+2]) ? to_swap[j*3+1]+1 : to_swap[j*3+1]);
-            if(de < 0 || p < (-de / temp)*(-de / temp)){
-                //prihvaceno
+            //printf("najbolja promena: %0.0f => [%d, %d] <-> [%d, %d]", de, to_swap[j*3], to_swap[j*3+1],
+            //                                                      (to_swap[j*3+2]) ? to_swap[j*3]: to_swap[j*3]+1,
+            //                                                      (to_swap[j*3+2]) ? to_swap[j*3+1]+1 : to_swap[j*3+1]);
+            if(de < 0 || *p < (-de / *temp)*(-de / *temp)){
+                pixel = to_swap[j*3]*width + to_swap[j*3+1];
+                pixel2 = (to_swap[j*3+2]) ? pixel+ 3 : pixel + width;
+                int r = image_device[pixel*3];
+                int g = image_device[pixel*3+1];
+                int b = image_device[pixel*3+2];
+                image_device[pixel*3] = image_device[pixel2*3];
+                image_device[pixel*3+1] = image_device[pixel2*3+1];
+                image_device[pixel*3+2] = image_device[pixel2*3+2];
+                image_device[pixel2*3] = r;
+                image_device[pixel2*3+1] = g;
+                image_device[pixel2*3+2] = b;
+                *energy += de;
+                //printf("   zamenio, temp: %f", *temp);
             }
         }
       }
    """)
 if __name__ == "__main__":
-    width = 5
-    #image = np.random.randint(0, 2, (5, 5, 3), dtype=np.uint8)#np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)
-    image = np.array([[[0, 1, 1], [0, 1, 0], [1, 0, 1], [1, 1, 1], [1, 0, 1]],
-                      [[1, 1, 1], [1, 0, 1], [1, 1, 1], [1, 0, 0], [1, 1, 0]],
-                      [[1, 1, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0], [0, 0, 1]],
-                      [[1, 0, 1], [0, 0, 0], [0, 1, 1], [0, 1, 1], [0, 1, 1]],
-                      [[0, 0, 1], [1, 0, 0], [1, 0, 1], [0, 1, 1], [1, 1, 1]]], dtype=np.uint8)
+    width = 32
+    image = np.random.randint(0, 255, (width, width, 3), dtype=np.uint8)
+    # image = np.array([[[0, 1, 1], [0, 1, 0], [1, 0, 1], [1, 1, 1], [1, 0, 1]],
+    #                   [[1, 1, 1], [1, 0, 1], [1, 1, 1], [1, 0, 0], [1, 1, 0]],
+    #                   [[1, 1, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0], [0, 0, 1]],
+    #                   [[1, 0, 1], [0, 0, 0], [0, 1, 1], [0, 1, 1], [0, 1, 1]],
+    #                   [[0, 0, 1], [1, 0, 0], [1, 0, 1], [0, 1, 1], [1, 1, 1]]], dtype=np.uint8)
 
-    """DEFINISANJE PARAMETARE"""
+    plt.imshow(image)
+    plt.axis('off')
+    plt.show()
+
+    """DEFINISANJE PARAMETARA"""
     image_gpu = cuda.mem_alloc(image.nbytes)
     cuda.memcpy_htod(image_gpu, image)
 
@@ -237,45 +255,38 @@ if __name__ == "__main__":
     results_gpu = cuda.mem_alloc(results.nbytes)
     cuda.memcpy_htod(results_gpu, results)
 
-    to_swap = [[2, 0, 1], [2, 0, 0], [0, 0, 0], [0, 3, 1], [0, 2, 1], [2, 3, 0], [3, 1, 0], [0, 2, 0]]  # generate_to_swap()
-    to_swap_gpu = cuda.mem_alloc(np.array(to_swap).nbytes)
-    cuda.memcpy_htod(to_swap_gpu, np.array(to_swap))
-
-    start_temp = np.array([100], dtype=np.float32)
-    temp_gpu = cuda.mem_alloc(start_temp.nbytes)
-    cuda.memcpy_htod(temp_gpu, start_temp)
-
-    probability = np.array([random.random()], dtype=np.float32)
-    probability_gpu = cuda.mem_alloc(probability.nbytes)
-    cuda.memcpy_htod(probability_gpu, probability)
-
     """POZIV KERNELA"""
     calculate_energy = mod.get_function("calculate_energy")  # 32, 32, 1        grid=(math.ceil(width/32), math.ceil(width/32), 1))
-    calculate_energy(image_gpu, energy_gpu, np.int32(width), block=(5, 5, 1), grid=(1, 1, 1))
+    calculate_energy(image_gpu, energy_gpu, np.int32(width), block=(32, 32, 1), grid=(1, 1, 1))
     cuda.memcpy_dtoh(energy, energy_gpu)
     cuda.memcpy_dtoh(image, image_gpu)
     print("energija: ", energy[0])
 
+    total = 30
+    starting_temp = 100
     simulated_annealing = mod.get_function("simulated_annealing")
-    simulated_annealing(image_gpu, np.int32(width), energy_gpu, to_swap_gpu, results_gpu, temp_gpu, probability_gpu, block=(12, 8, 1), grid=(1, 1, 1))
-    cuda.memcpy_dtoh(results, results_gpu)
-    print("\nresultati 8 swapova: ", results)
+    temp = np.array([starting_temp], dtype=np.float32)
+    temp_gpu = cuda.mem_alloc(temp.nbytes)
+    cuda.memcpy_htod(temp_gpu, temp)
+    for i in range(total):
+        t = i / total
+        temp[0] = (1 - t) * starting_temp
+        cuda.memcpy_htod(temp_gpu, temp)
+        to_swap = to_swap = generate_to_swap()
+        to_swap_gpu = cuda.mem_alloc(np.array(to_swap).nbytes)
+        cuda.memcpy_htod(to_swap_gpu, np.array(to_swap))
 
-    # starting_temp = 100
-    # total = 30_000_000
-    # for iteration in tqdm(range(total)):
-    #     t = iteration / total
-    #     temp = (1 - t) * starting_temp
-    #     image2[src[0], src[1]] = image[tgt[0], tgt[1]]
-    #     image2[tgt[0], tgt[1]] = image[src[0], src[1]]
-    #
-    #     dE = energy_delta(image, image2, src, tgt)
-    #     if dE < 0 or random.random() < np.exp2(-dE / temp):
-    #         image[src[0], src[1]] = image2[src[0], src[1]]
-    #         image[tgt[0], tgt[1]] = image2[tgt[0], tgt[1]]
-    #         # current_energy = new_energy
-    #         current_energy += dE
-    #         swaps += 1
-    #     else:
-    #         image2[src[0], src[1]] = image[src[0], src[1]]
-    #         image2[tgt[0], tgt[1]] = image[tgt[0], tgt[1]]
+        probability = np.array([random.random()], dtype=np.float32)
+        probability_gpu = cuda.mem_alloc(probability.nbytes)
+        cuda.memcpy_htod(probability_gpu, probability)
+
+        simulated_annealing(image_gpu, np.int32(width), energy_gpu, to_swap_gpu, results_gpu, temp_gpu, probability_gpu, block=(12, 8, 1), grid=(1, 1, 1))
+        cuda.memcpy_dtoh(image, image_gpu)
+        cuda.memcpy_dtoh(results, results_gpu)
+        cuda.memcpy_dtoh(energy, energy_gpu)
+        #print("\n")
+    print("\nenergija posle:", energy[0])
+    plt.imshow(image)
+    plt.axis('off')
+    plt.show()
+    # to_swap = [[2, 0, 1], [2, 0, 0], [0, 0, 0], [0, 3, 1], [0, 2, 1], [2, 3, 0], [3, 1, 0], [0, 2, 0]]
