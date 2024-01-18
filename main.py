@@ -262,7 +262,7 @@ if __name__ == "__main__":
     cuda.memcpy_dtoh(image, image_gpu)
     print("energija: ", energy[0])
 
-    total = 30
+    total = 10000
     starting_temp = 100
     simulated_annealing = mod.get_function("simulated_annealing")
     temp = np.array([starting_temp], dtype=np.float32)
