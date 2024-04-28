@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project focuses on reducing the energy of images using CUDA parallel programming on the GPU. The main goal is to optimize image processing tasks by leveraging the computational power of NVIDIA GPUs. This README provides an overview of the project structure.
+This project focuses on reducing the energy of images using CUDA parallel programming on the GPU. The main goal is to optimize image processing tasks by leveraging the computational power of NVIDIA GPUs.
 
 ## Features
 
